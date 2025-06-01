@@ -1,8 +1,5 @@
 import pandas_datareader.data as web
 import yfinance as yf
-import numpy as np
-from torch.utils.data import Dataset
-import torch
 
 def get_asset_dataset(start, end):
     etfs = ['AGG', 'DBC', 'VTI']
@@ -14,57 +11,10 @@ def get_asset_dataset(start, end):
 
     returns_df =  close_df.pct_change()[1:]
     close_df = close_df[1:]
-    return returns_df, close_df
 
-def create_windows(data, indices, lookback, horizon):
-    X, y = [], []
-    index_list = []
 
-    for i in range(len(indices) - lookback - horizon):
-        # print(i)
-        window_start = indices[i]
-        input_end = indices[i + lookback]
-        output_end = indices[i + lookback + horizon]
 
-        x_window = data.loc[window_start:input_end].iloc[:-1].values  # shape: (lookback, features)
-        y_window = data.loc[input_end:output_end].iloc[:horizon].values  # shape: (horizon, features)
-        
-        X.append(x_window)
-        y.append(y_window)
-        index_list.append(input_end)  # center timestamp for reference
 
-    return np.array(X), np.array(y), index_list
-
-def standardize(x, mean, std):
-    return (x - mean.view(1, 1, -1)) / std.view(1, 1, -1)
-
-def destandardize(y, mean, std):
-
-    return y * std.view(1, 1, -1) + mean.view(1, 1, -1)
-
-class Jitter:
-    def __init__(self, sigma):
-        self.sigma = sigma#sigma.view(1, -1)  # shape (1, num_assets), for broadcasting
-
-    def __call__(self, x):
-        noise = torch.randn_like(x) * self.sigma  # apply per-asset noise
-        return x + noise
-    
-class AugmentedTimeSeriesDataset(Dataset):
-    def __init__(self, X, y, transform=None):
-        self.X = X
-        self.y = y
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.X)
-
-    def __getitem__(self, idx):
-        x = self.X[idx]
-        if self.transform:
-            x = self.transform(x)
-        return x, self.y[idx]
-    
 
 # import pandas as pd
 # from sklearn.preprocessing import StandardScaler
