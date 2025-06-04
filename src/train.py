@@ -6,132 +6,30 @@ from auto_LiRPA import BoundedTensor, PerturbationLpNorm
 import numpy as np
 from tqdm import tqdm
 
-
-def train_model(model, train_loader, test_loader, device, epochs=6, lr=0.001, patience=5):
-    model = model.to(device)  # Move model to the selected device
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.MSELoss()
-    
-    scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
-    
-    best_loss = float('inf')
-    patience_counter = 0
-    
-    for epoch in range(epochs):
-        model.train()
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)  # Move batch to device
-            optimizer.zero_grad()
-            preds = model(xb)
-            loss = loss_fn(preds, yb)
-            loss.backward()
-            optimizer.step()
-
-        model.eval()
-        test_loss = 0.0
-        with torch.no_grad():
-            for xb, yb in test_loader:
-                xb, yb = xb.to(device), yb.to(device)  # Move test batch to device
-                preds = model(xb)
-                test_loss += loss_fn(preds, yb).item() * len(xb)
-
-        test_loss /= len(test_loader.dataset)
-
-        print(f"Epoch {epoch+1:2d}, Test Loss: {test_loss:.4f}")
-
-        if test_loss < best_loss:
-            best_loss = test_loss
-            patience_counter = 0
-        else:
-            patience_counter += 1
-
-        if patience_counter >= patience:
-            print("🛑 Early stopping triggered.")
-            break
-
-        scheduler.step(test_loss)
-    return model
-
-
-def lower_bound_verified(model, x, eps, method="CROWN-IBP"):
-    perturbation = PerturbationLpNorm(norm=np.inf, eps=eps)
-    x_perturbed = BoundedTensor(x, perturbation)
-    lb, _ = model.compute_bounds(x=(x_perturbed,), method=method)
-    return lb
-
-
 import os
+import itertools
+import json
+import time
+import random
 
-def load_or_train_model(model, model_path, train_fn, device):
-    # model_path = RESULT_PATH + model_path
-    if os.path.exists(model_path):
-        print(f"🔄 Loading model from {model_path}")
-        model.load_state_dict(torch.load(model_path, map_location=device))
-    else:
-        print(f"🚀 Training new model")
-        model = train_fn(model)
-        print(f"🔄 Saving model from {model_path}")
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-        torch.save(model.state_dict(), model_path)
+def set_seed(seed):
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-    return model
 
-def pgd_attack(model, x_init, y, eps, loss_fn= nn.MSELoss(), n_steps=40, step_size=0.01):
-    was_training = model.training
-    model.eval()
+def MR_Loss(weights, y):
+    weights = weights.unsqueeze(1)
+    return (-weights * y).mean()
 
-    attack_point = x_init.clone().detach()
-    attack_loss = (-float('inf')) * torch.ones(x_init.shape[0], device=x_init.device)
-
-    with torch.enable_grad():
-        adv_input = x_init.clone().detach().requires_grad_(True)
-
-        for _ in range(n_steps):
-            if adv_input.grad is not None:
-                adv_input.grad.zero_()
-
-            adv_outs = model(adv_input)
-            obj = loss_fn(adv_outs, y)
-
-            attack_point = torch.where(
-                (obj >= attack_loss).view((-1,) + (1,) * (x_init.dim() - 1)),
-                adv_input.detach().clone(), attack_point)
-            attack_loss = torch.where(obj >= attack_loss, obj.detach().clone(), attack_loss)
-
-            grad = torch.autograd.grad(obj.sum(), adv_input)[0]
-            adv_input = adv_input + step_size * grad.sign()
-
-            # Project to L∞ ball
-            delta = torch.clamp(adv_input - x_init, min=-eps, max=eps)
-            adv_input = (x_init + delta).detach().requires_grad_(True)
-
-        # Final selection
-        adv_outs = model(adv_input)
-        obj = loss_fn(adv_outs, y)
-        attack_point = torch.where(
-            (obj >= attack_loss).view((-1,) + (1,) * (x_init.dim() - 1)),
-            adv_input.detach().clone(), attack_point)
-
-    # Restore model mode
-    if was_training:
-        model.train()
-
-    return attack_point
-
-        
 def train_step(model, device, loader, optimizer, loss_fn, epoch, params={}, mode="train"):
-
     model.train()
-
-    robust_eps = params.get("robust_eps", 0.1)
-    method = params.get("robust_method", "standard")
-    alpha = params.get("robust_alpha", 0.5)
-
-    warmup_epochs = params.get("warmup_epochs", 1)
-    alpha = min(epoch / warmup_epochs, 1.0) * alpha
-
     gradient_clipping = params.get("gradient_clipping", None)
-
 
     is_train = mode == "train"
     if is_train:
@@ -139,64 +37,20 @@ def train_step(model, device, loader, optimizer, loss_fn, epoch, params={}, mode
     else:
         model.eval()
 
-    # mse_loss = 
     total_loss = 0.0
     num_batches = 0
 
     context = torch.enable_grad() if is_train else torch.no_grad()
 
-    show_bar = params.get("progress_bar", False)
-
-    bar = tqdm(loader) if show_bar else loader
-
-
     with context:
 
-        for x, y in bar:
+        for x, y in loader:
             x, y = x.to(device), y.to(device)
 
             if is_train:
                 optimizer.zero_grad()    
 
-            loss = loss_fn(x, y, model)      
-            # if method == "standard":
-            #     output = model(x)
-            #     loss = loss_fn(output, y)
-
-            # elif method == "pgd":
-            #     output_adv = model(pgd_attack(model, x, y, robust_eps, loss_fn))
-            #     loss = loss_fn(output_adv, y)
-
-            # elif method == "IBP":
-            #     output_lb_cert = lower_bound_verified(model, x, robust_eps, method="IBP")
-            #     loss =  loss_fn(output_lb_cert, y)
-
-            # elif method == "CROWN-IBP":
-            #     output = model(x)
-            #     output_lb_cert = lower_bound_verified(model, x, robust_eps, method="CROWN-IBP")
-            #     loss = (1-alpha) * loss_fn(output, y) + loss_fn(output_lb_cert, y) * alpha
-
-            # elif method in ["MTL-IBP", "CC-IBP", "Exp-IBP"]:
-            #     output_lb_cert = lower_bound_verified(model, x, robust_eps, method="IBP")
-            #     output_adv = model(pgd_attack(model, x, y, robust_eps, loss_fn))
-
-            #     if method == "CC-IBP":
-            #         loss = loss_fn((1 - alpha) * output_adv +  alpha * output_lb_cert, y)
-
-            #     elif method == "MTL-IBP":
-            #         robust_loss = loss_fn(output_lb_cert, y)
-            #         adv_loss = loss_fn(output_adv, y)
-
-            #         loss = (1 - alpha) * adv_loss +  alpha * robust_loss
-
-            #     elif method == "Exp-IBP":
-            #         robust_loss = loss_fn(output_lb_cert, y)
-            #         adv_loss = loss_fn(output_adv, y)
-
-            #         loss = (adv_loss **(1 - alpha)) * (robust_loss ** alpha)       
-
-            # else:
-            #     raise ValueError(f"Unknown method '{method}'")
+            loss = loss_fn(x, y, model, epoch)      
             
             if is_train:
                 loss.backward()
@@ -212,41 +66,142 @@ def train_step(model, device, loader, optimizer, loss_fn, epoch, params={}, mode
     return total_loss / max(1, num_batches)
 
 
+# def default_dataset_fn(params):
+#     return (train_dataset, test_dataset) 
 
-def train_model_final(model, device, train_loader, test_loader, loss_fn, params={}):
+def grid_to_sets(grids):
+    if not isinstance(grids, list):
+        grids = [grids]  # Wrap single grid in a list
 
-    lr = params.get("learning_rate", 0.001)
-    epochs = params.get("epochs", 10)
-    weight_decay = params.get("weight_decay", 1e-5)
-    patience = params.get("patience", None)
+    all_combinations = []
+    for grid in grids:
+        keys = grid.keys()
+        combinations = [dict(zip(keys, values)) for values in itertools.product(*grid.values())]
+        all_combinations.extend(combinations)
 
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    # optimizer = optim.Adam(model.parameters(), lr=lr)
-    optimizer.zero_grad()
+    return all_combinations
 
-    best_loss = float('inf')
-    patience_counter = 0
+def model_file_name(params):
+    model_name = ",".join(
+            f"{key}={val}" for key, val in params.items() if val is not None
+        ) + ".pth"
+    return model_name
 
-    train_losses = []
-    val_losses = []
 
-    for epoch in range(epochs):
-        model.train()
-        train_loss  = train_step(model, device, train_loader, optimizer, loss_fn, epoch+1, params, "train")
-        val_loss = train_step(model, device, test_loader, optimizer, loss_fn, epoch+1, params, "eval")
+def label_from_params(params, experiments):
+    nested = [list(v["params"].items()) for k, v in experiments.items()]
 
-        print(f"Epoch {epoch+1:2d}, Train Loss: {train_loss:.6f}: Val Loss: {val_loss:.6f}")
-
-        if val_loss < best_loss:
-            best_loss = val_loss
-            patience_counter = 0
+    ps = {}
+    for k,v in [item for sublist in nested for item in sublist]:
+        if k in ps:
+            ps[k].add(v)
         else:
-            patience_counter += 1
+            ps[k] = {v}
 
-        if patience is not None and patience_counter >= patience:
-            print("🛑 Early stopping triggered.")
-            break
+    params_to_use = []
 
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-    return train_losses, val_losses
+    for k,v in ps.items():
+        if len(v) > 1:
+            params_to_use.append(k)
+
+    if "label" in params:
+        label = params["label"] + " "
+    else:
+        label = ""
+
+    return label + " ".join(
+                f"{key}={val}" for key, val in params.items() if key in params_to_use and key != "label"
+            )
+
+
+def name_experiments(experiments):
+    return {label_from_params(v["params"], experiments): v for k, v in experiments.items()}
+
+def get_experiment_model(model_fn, experiment_path, params_grid, loss_fn_fn, dataset_fn, device="cuda"):
+    experiments = {}
+
+    train_result_path = os.path.join(experiment_path, "train_results.csv")
+    os.makedirs(os.path.dirname(train_result_path), exist_ok=True)
+    if os.path.exists(train_result_path):
+        with open(train_result_path, 'r') as file:
+            train_results = json.load(file)
+    else:
+        train_results = {}
+
+    param_sets = grid_to_sets(params_grid)
+
+    for params in param_sets:
+        # name = f"{}"
+        epochs = params.get("epochs", 10)
+        checkpoint_freq = params.get("checkpoint_freq", epochs)
+        
+        paths = {}
+        for epoch in range(1, epochs + 1):
+            if epoch % checkpoint_freq == 0 or epochs==epoch: 
+                name = model_file_name(params | {"checkpoint": epoch})
+                model_path = os.path.join(experiment_path, name)
+                paths[epoch] = model_path
+
+        load_checkpoint = params.get("checkpoint", None)
+        print(load_checkpoint)
+        if load_checkpoint is not None:
+            paths = {load_checkpoint: paths[load_checkpoint]}
+            del params["checkpoint"]
+            print(paths)
+        print([os.path.exists(p) for p in paths.values()])
+            
+      
+       
+        if all([os.path.exists(p) for p in paths.values()]):
+            for checkpoint, path in paths.items():
+                print("Loading", path)
+                checkpoint_params = params | {"checkpoint": checkpoint}
+                name = model_file_name(checkpoint_params)
+                model_path = os.path.join(experiment_path, name)
+                model = model_fn(params)
+                model.load_state_dict(torch.load(model_path, map_location=device))
+                experiments[name] = {"model": model, "params": checkpoint_params, "results": {}, "train_results": train_results[model_path]}
+        else:
+            print("Training", model_file_name(params))
+            if "seed" in params:
+                set_seed(params["seed"])
+            model = model_fn(params)
+            loss_fn = loss_fn_fn(params)
+            train_losses = []
+            val_losses = []
+            lr = params.get("learning_rate", 0.001)
+            weight_decay = params.get("weight_decay", 1e-5)
+            
+            optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+            train_time = 0
+            pbar = tqdm(range(1, epochs + 1), desc="Epochs", unit="ep")
+
+            train_loader, val_loader = dataset_fn(params)
+
+            for epoch in pbar:
+                start_time = time.time()
+                train_loss  = train_step(model, device, train_loader, optimizer, loss_fn, epoch, params,"train")
+                train_time += time.time() - start_time
+
+                val_loss = train_step(model, device, val_loader, optimizer, loss_fn, epoch, params, "eval")
+                train_losses.append(train_loss)
+                val_losses.append(val_loss)
+
+                pbar.set_postfix(train_loss=f"{train_loss:.5f}",val_loss=f"{val_loss:.10f}")
+
+                if epoch % checkpoint_freq == 0 or epoch == epochs:
+                    checkpoint_params = params | {"checkpoint": epoch}
+                    name = model_file_name(checkpoint_params)
+                   
+                    model_path = os.path.join(experiment_path, name)
+                    print("Saving", name)
+                    train_results[model_path] = {"train_time": train_time, "train_losses": train_losses.copy(), "val_losses": val_losses.copy()}
+                    torch.save(model.state_dict(), model_path)
+
+                    checkpoint_model = model_fn(params)
+                    checkpoint_model.load_state_dict(torch.load(model_path, map_location=device))
+                    experiments[name] = {"model": checkpoint_model, "params": checkpoint_params, "results": {}, "train_results": train_results[model_path]}
+                    with open(train_result_path, 'w') as file: 
+                        json.dump(train_results, file, indent=4)
+    experiments = name_experiments(experiments)
+    return experiments

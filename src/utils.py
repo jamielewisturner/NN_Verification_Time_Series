@@ -6,15 +6,7 @@ import pandas as pd
 
 RESULT_PATH = "../results/"
 
-def set_seed(seed):
-    torch.manual_seed(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+
 
 def predict(model, scaler, X_test):
     return scaler.inverse_transform(model(X_test).cpu().detach().numpy())

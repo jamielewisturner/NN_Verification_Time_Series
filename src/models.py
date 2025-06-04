@@ -2,6 +2,84 @@ import torch.nn as nn
 import torch
 from torch.nn import functional as F
 
+class CustomSoftmax(nn.Module):
+    def __init__(self, dim: int = -1, eps: float = 1e-5):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        e = torch.exp(x)
+        return e / (e.sum(dim=self.dim, keepdim=True) + self.eps)
+
+class SimpleAssetAllocationModel(nn.Module):
+    def __init__(self, input_channels=4, output_channels=4):
+        super(SimpleAssetAllocationModel, self).__init__()
+        
+        input_size = input_channels
+        self.fc1 = nn.Linear(input_size, 64)
+        self.fc2 = nn.Linear(64, 32)
+        self.fc3 = nn.Linear(32, output_channels)
+        self.softmax = CustomSoftmax(dim=-1)
+
+        # self.fc4 = nn.Linear(4*50, 4)
+
+    def forward(self, x):
+
+        x = torch.flatten(x, start_dim=-2)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+        return self.softmax(x)    
+    
+class CNNAllocatorCausal(nn.Module):
+    def __init__(self, input_channels=4, time_steps=50, hidden_size=100, dropout_rate=0.1):
+        super().__init__()
+
+        self.conv1 = nn.Conv1d(in_channels=input_channels, out_channels=32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, padding=1)
+        
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout_rate)
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.Linear(64 * time_steps, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, input_channels)
+        self.softmax = CustomSoftmax(dim=-1)
+
+    def forward(self, x):
+        # x: (B, T, N) → (B, N, T)
+        x = x.transpose(1, 2)
+
+        x = self.relu(self.conv1(x))
+        # x = self.dropout(x)
+
+        x = self.relu(self.conv2(x))
+        # x = self.dropout(x)
+
+        x = self.flatten(x)
+        x = self.relu(self.fc1(x))
+        # x = self.dropout(x)
+
+        x = self.fc2(x)
+        
+        return self.softmax(x)
+
+class UniformModel(nn.Module):
+    def __init__(self, n_assets=4):
+        super(UniformModel, self).__init__()
+        self.n_assets = n_assets
+
+    def forward(self, x):
+        b = x.shape[0]
+        return torch.full((b, self.n_assets), 1/self.n_assets, device=x.device, dtype=x.dtype)
+    
+class FixedWeightModel(nn.Module):
+    def __init__(self, default_weights):
+        super(FixedWeightModel, self).__init__()
+        self.weights = default_weights
+    def forward(self, x):
+        b = x.shape[0]
+        return self.weights.to(x.device, dtype=x.dtype).expand(b, -1)
 
 class MLP(nn.Module):
     def __init__(self, input_size, output_size=1):
@@ -36,39 +114,7 @@ class CNN(nn.Module):
         x = self.conv(x)
         x = self.fc(x)
         return x
-    
 
-
-class LSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, num_classes):
-        super(LSTM, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-
-        self.lstm_cells = nn.ModuleList([
-            nn.LSTMCell(input_size if i == 0 else hidden_size, hidden_size)
-            for i in range(num_layers)
-        ])
-        
-        self.fc = nn.Linear(hidden_size, num_classes)
-
-    def forward(self, x):
-        x = x.unsqueeze(-1)
-        # x shape: (batch, seq_len, input_size)
-        batch_size, seq_len, _ = x.size()
-        
-        # Initialize hidden and cell states for each layer
-        h = [torch.zeros(batch_size, self.hidden_size).to(x.device) for _ in range(self.num_layers)]
-        c = [torch.zeros(batch_size, self.hidden_size).to(x.device) for _ in range(self.num_layers)]
-
-        for t in range(seq_len):
-            input_t = x[:, t, :]
-            for i, cell in enumerate(self.lstm_cells):
-                h[i], c[i] = cell(input_t, (h[i], c[i]))
-                input_t = h[i]  # output of current layer is input to next
-
-        out = self.fc(h[-1])  # use last layer's final hidden state
-        return out
     
 # Custom Multihead Attention (No Dropout)
 class Attention(nn.Module):
@@ -156,7 +202,7 @@ class CustomTransformerEncoder(nn.Module):
 
 # Transformer2 Model (No Dropout)
 class Transformer(nn.Module):
-    def __init__(self, input_size, output_size, d_model=32, nhead=2, num_layers=2, dim_head=16):
+    def __init__(self, input_size, output_size, d_model=4, nhead=2, num_layers=2, dim_head=16):
         super(Transformer, self).__init__()
         self.input_proj = nn.Linear(1, d_model)
         self.pos_embedding = nn.Parameter(torch.randn(input_size, d_model))
@@ -173,7 +219,8 @@ class Transformer(nn.Module):
         )
 
     def forward(self, x):
-        x = x.unsqueeze(-1)  # (B, T, 1)
+        # x = x.unsqueeze(-1)  # (B, T, 1)
+
         x = self.input_proj(x) + self.pos_embedding  # (B, T, d_model)
         
         # Pass through custom transformer encoder
@@ -183,3 +230,102 @@ class Transformer(nn.Module):
         x = x.flatten(start_dim=1)  # (B, T * d_model)
         return self.fc(x)
     
+
+
+class Transformer(nn.Module):
+    def __init__(self, input_size, output_size, d_model=4, nhead=2, num_layers=2, dim_head=16):
+        super(Transformer, self).__init__()
+        # input_proj now takes 4 input features per time step
+        self.input_proj = nn.Linear(4, d_model)
+        
+        # Positional embeddings: (1, input_size, d_model)
+        # Broadcasted to each batch
+        self.pos_embedding = nn.Parameter(torch.randn(1, input_size, d_model))
+        
+        # Custom transformer encoder (you probably have these defined elsewhere)
+        encoder_layer = CustomTransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_head=dim_head)
+        self.transformer = CustomTransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # Final fully connected layers
+        self.fc = nn.Sequential(
+            nn.Linear(d_model * input_size, 64),
+            nn.ReLU(),
+            nn.Linear(64, output_size)
+        )
+
+    def forward(self, x):
+        """
+        x: (batch_size, seq_len, 4)  # 4 input features (assets)
+        """
+        # Project 4 input features to d_model
+        x = self.input_proj(x)  # (B, T, d_model)
+        
+        # Add positional encoding (broadcasted across batch dimension)
+        x = x + self.pos_embedding  # (B, T, d_model)
+        
+        # Pass through transformer
+        x = self.transformer(x)  # (B, T, d_model)
+        
+        # Flatten time and d_model dimensions
+        x = x.flatten(start_dim=1)  # (B, T * d_model)
+
+        x = self.fc(x)
+
+        x = torch.softmax(x, dim=1)
+        
+        return x
+    
+        
+class LSTM_Unrolled(nn.Module):
+    def __init__(self, input_size=4, hidden_size=64, num_layers=4, num_classes=4):
+        super(LSTM_Unrolled, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        self.lstm_cells = nn.ModuleList([
+            nn.LSTMCell(input_size if i == 0 else hidden_size, hidden_size)
+            for i in range(num_layers)
+        ])
+        
+        self.fc = nn.Linear(hidden_size, num_classes)
+        self.softmax = CustomSoftmax(dim=-1)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.size()
+
+        h = [torch.zeros(batch_size, self.hidden_size, device=x.device) for _ in range(self.num_layers)]
+        c = [torch.zeros(batch_size, self.hidden_size, device=x.device) for _ in range(self.num_layers)]
+
+        for t in range(seq_len):
+            input_t = x[:, t, :]
+            for i, cell in enumerate(self.lstm_cells):
+                h[i], c[i] = cell(input_t, (h[i], c[i]))
+                input_t = h[i]
+
+        out = self.fc(h[-1])
+
+        return self.softmax(out)
+
+class LSTM(nn.Module):
+    def __init__(self, input_size=4, hidden_size=64, num_layers=4, num_classes=4):
+        super().__init__()
+        # self.temperature = temperature
+
+        self.lstm = nn.LSTM(input_size=input_size,
+                            hidden_size=hidden_size,
+                            num_layers=num_layers,
+                            batch_first=True,
+                            )
+
+        self.fc = nn.Linear(50 * hidden_size, num_classes)
+
+    def forward(self, x):
+        # LSTM expects (B, 50, 4)
+        out, _ = self.lstm(x)   # (B, 50, hidden_size)
+        # print(out.shape)
+        # out = out[:, -1, :]     # last timestep
+        out = out.reshape(out.size(0), -1)
+        # print(out.shape)
+        out = self.fc(out)      # project to (B, 4)
+        return torch.softmax(out, dim=1)
+

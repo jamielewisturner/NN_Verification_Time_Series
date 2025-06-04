@@ -31,7 +31,7 @@ def create_windows(data, indices, lookback, horizon):
         
         X.append(x_window)
         y.append(y_window)
-        index_list.append(input_end)  # center timestamp for reference
+        index_list.append(window_start)  # center timestamp for reference
 
     return np.array(X), np.array(y), index_list
 
