@@ -4,6 +4,7 @@ general:
   save_adv_example: true
   save_output: true
   show_adv_example: true
+  complete_verifier: skip
   # return_optimized_model: true
 # This is an example configuration file that contains most useful parameter settings.
 model:
@@ -18,16 +19,28 @@ data:
   end: 100
 
 specification:
-  epsilon: 0.1  # 2./255.
+  epsilon: 1  # 2./255.
   robustness_type: custom
-  delta: 0.004
+  delta: 0.2
 solver:
-  batch_size: 1024
-  beta-crown:
-    iteration: 1
+  batch_size: 128
+  # beta-crown:
+  #   iteration: 1
+
+  alpha-crown:
+    iteration: 200
+
 attack:
-  pgd_order: middle
-  pgd_restarts: 10
+  pgd_order: before
+  pgd_steps: 100 
+  pgd_restarts: 60
+  pgd_early_stop: true
+  # adv_saver: custom_adv_saver
+
+# bab:
+#   timeout: 20
+#   vanilla_crown: true
+#   max_iterations: 4
 
 
 
