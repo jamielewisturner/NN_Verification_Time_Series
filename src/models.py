@@ -47,22 +47,68 @@ class CNNAllocatorCausal(nn.Module):
         self.softmax = CustomSoftmax(dim=-1)
 
     def forward(self, x):
-        # x: (B, T, N) → (B, N, T)
         x = x.transpose(1, 2)
 
         x = self.relu(self.conv1(x))
-        # x = self.dropout(x)
-
         x = self.relu(self.conv2(x))
-        # x = self.dropout(x)
 
         x = self.flatten(x)
         x = self.relu(self.fc1(x))
-        # x = self.dropout(x)
 
         x = self.fc2(x)
         
         return self.softmax(x)
+    
+# import torch.nn as nn
+
+# class CNNAllocatorCausal(nn.Module):
+#     def __init__(self, input_channels=4, time_steps=50, hidden_size=100):
+#         super().__init__()
+
+#         # First causal convolution: kernel_size=3, dilation=1 → left padding = 2
+#         self.pad1 = nn.ConstantPad1d((2, 0), 0)
+#         self.conv1 = nn.Conv1d(
+#             in_channels=input_channels,
+#             out_channels=32,
+#             kernel_size=3,
+#             dilation=1,
+#             padding=0
+#         )
+
+#         # Second causal convolution: kernel_size=3, dilation=1 → left padding = 2
+#         self.pad2 = nn.ConstantPad1d((2, 0), 0)
+#         self.conv2 = nn.Conv1d(
+#             in_channels=32,
+#             out_channels=64,
+#             kernel_size=3,
+#             dilation=1,
+#             padding=0
+#         )
+
+#         self.relu = nn.ReLU()
+#         self.flatten = nn.Flatten()
+#         self.fc1 = nn.Linear(64 * time_steps, hidden_size)
+#         self.fc2 = nn.Linear(hidden_size, input_channels)
+#         self.softmax = CustomSoftmax(dim=-1)
+
+#     def forward(self, x):
+#         # x: (batch_size, time_steps, input_channels)
+#         # transpose to (batch_size, input_channels, time_steps)
+#         x = x.transpose(1, 2)
+
+#         # First causal conv
+#         x = self.pad1(x)
+#         x = self.relu(self.conv1(x))
+
+#         # Second causal conv
+#         x = self.pad2(x)
+#         x = self.relu(self.conv2(x))
+
+#         x = self.flatten(x)
+#         x = self.relu(self.fc1(x))
+#         x = self.fc2(x)
+#         return self.softmax(x)
+
 
 class UniformModel(nn.Module):
     def __init__(self, n_assets=4):
@@ -199,6 +245,35 @@ class CustomTransformerEncoder(nn.Module):
         for layer in self.layers:
             src = layer(src)
         return src
+    
+class FinalCNN(nn.Module):
+    def __init__(self, input_channels=4, time_steps=50, hidden_size=100, dropout_rate=0.1):
+        super().__init__()
+
+        self.conv1 = nn.Conv1d(in_channels=input_channels, out_channels=32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, padding=1)
+        
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout_rate)
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.Linear(64 * time_steps, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, input_channels)
+        self.softmax = CustomSoftmax(dim=-1)
+
+    def forward(self, x):
+        x = x.transpose(1, 2)
+
+        x = self.relu(self.conv1(x))
+        x = self.relu(self.conv2(x))
+
+        x = self.flatten(x)
+        x = self.relu(self.fc1(x))
+
+        x = self.fc2(x)
+
+        # print(x,  self.softmax(x), self.softmax(x/10))
+        
+        return self.softmax(x)
 
 # Transformer2 Model (No Dropout)
 class Transformer(nn.Module):
@@ -253,6 +328,8 @@ class Transformer(nn.Module):
             nn.Linear(64, output_size)
         )
 
+        self.softmax = CustomSoftmax(dim=-1)
+
     def forward(self, x):
         """
         x: (batch_size, seq_len, 4)  # 4 input features (assets)
@@ -271,7 +348,7 @@ class Transformer(nn.Module):
 
         x = self.fc(x)
 
-        x = torch.softmax(x, dim=1)
+        x = self.softmax(x/10)
         
         return x
     
@@ -305,6 +382,36 @@ class LSTM_Unrolled(nn.Module):
         out = self.fc(h[-1])
 
         return self.softmax(out)
+    
+
+class LSTM_Cell_Unrolled(nn.Module):
+    def __init__(self, input_size=4, hidden_size=64, num_classes=4):
+        super(LSTM_Unrolled, self).__init__()
+        self.hidden_size = hidden_size
+
+        self.lstm_cells = nn.ModuleList([
+            nn.LSTMCell( hidden_size)
+        ])
+        
+        self.fc = nn.Linear(hidden_size, num_classes)
+        self.softmax = CustomSoftmax(dim=-1)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.size()
+
+        h = [torch.zeros(batch_size, self.hidden_size, device=x.device) for _ in range(self.num_layers)]
+        c = [torch.zeros(batch_size, self.hidden_size, device=x.device) for _ in range(self.num_layers)]
+
+        for t in range(seq_len):
+            input_t = x[:, t, :]
+            for i, cell in enumerate(self.lstm_cells):
+                h[i], c[i] = cell(input_t, (h[i], c[i]))
+                input_t = h[i]
+
+        out = self.fc(h[-1])
+
+        return self.softmax(out)
+
 
 class LSTM(nn.Module):
     def __init__(self, input_size=4, hidden_size=64, num_layers=4, num_classes=4):
@@ -320,12 +427,8 @@ class LSTM(nn.Module):
         self.fc = nn.Linear(50 * hidden_size, num_classes)
 
     def forward(self, x):
-        # LSTM expects (B, 50, 4)
         out, _ = self.lstm(x)   # (B, 50, hidden_size)
-        # print(out.shape)
-        # out = out[:, -1, :]     # last timestep
         out = out.reshape(out.size(0), -1)
-        # print(out.shape)
         out = self.fc(out)      # project to (B, 4)
         return torch.softmax(out, dim=1)
 

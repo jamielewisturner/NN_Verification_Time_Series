@@ -28,12 +28,12 @@ solver:
   #   iteration: 1
 
   alpha-crown:
-    iteration: 200
+    iteration: 20
 
 attack:
   pgd_order: before
-  pgd_steps: 100 
-  pgd_restarts: 60
+  pgd_steps: 80 
+  pgd_restarts: 30
   pgd_early_stop: true
   # adv_saver: custom_adv_saver
 

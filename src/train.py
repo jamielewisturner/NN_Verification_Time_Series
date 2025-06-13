@@ -5,6 +5,7 @@ import torch.optim.lr_scheduler as lr_scheduler
 from auto_LiRPA import BoundedTensor, PerturbationLpNorm
 import numpy as np
 from tqdm import tqdm
+from auto_LiRPA import BoundedTensor, PerturbationLpNorm,BoundedModule
 
 import os
 import itertools
@@ -42,6 +43,8 @@ def train_step(model, device, loader, optimizer, loss_fn, epoch, params={}, mode
 
     context = torch.enable_grad() if is_train else torch.no_grad()
 
+    extras = []
+
     with context:
 
         for x, y in loader:
@@ -50,7 +53,9 @@ def train_step(model, device, loader, optimizer, loss_fn, epoch, params={}, mode
             if is_train:
                 optimizer.zero_grad()    
 
-            loss = loss_fn(x, y, model, epoch)      
+            loss, extra = loss_fn(x, y, model, epoch) 
+
+            extras.append(extra)     
             
             if is_train:
                 loss.backward()
@@ -62,7 +67,18 @@ def train_step(model, device, loader, optimizer, loss_fn, epoch, params={}, mode
                 optimizer.step()
             total_loss += loss.item()
             num_batches += 1
+            # print(x.shape)
 
+    # print(num_batches)
+    output = None
+    for extra in extras:
+        if output is None:
+            output = extra
+        else:
+            for k,v in extra.items():
+                output[k] = output[k] + v
+
+    print(output)
     return total_loss / max(1, num_batches)
 
 
@@ -112,7 +128,25 @@ def label_from_params(params, experiments):
     return label + " ".join(
                 f"{key}={val}" for key, val in params.items() if key in params_to_use and key != "label"
             )
+def get_bounded_model2(model):
 
+    model = model.to("cuda")
+
+    beta_crown_args = {
+                "enable_alpha_crown": True,   # α-CROWN
+                "enable_beta_crown": True,    # β-CROWN (branch-and-bound)
+                "optimizer": "adam",          
+                "iteration": 5,              # α/β optimization steps
+                "lr_alpha": 0.5,
+                "lr_beta": 0.05,
+                "pruning_in_iteration": True
+            }
+
+    bound_opts = {
+            "optimize_bound_args": beta_crown_args,
+            "conv_mode": "matrix"
+        }
+    return BoundedModule(model, torch.zeros((10, 50, 4)), bound_opts=bound_opts)
 
 def name_experiments(experiments):
     return {label_from_params(v["params"], experiments): v for k, v in experiments.items()}
@@ -165,7 +199,8 @@ def get_experiment_model(model_fn, experiment_path, params_grid, loss_fn_fn, dat
             print("Training", model_file_name(params))
             if "seed" in params:
                 set_seed(params["seed"])
-            model = model_fn(params)
+            unbounded_model = model_fn(params)
+            model = get_bounded_model2(unbounded_model)
             loss_fn = loss_fn_fn(params)
             train_losses = []
             val_losses = []
@@ -179,6 +214,7 @@ def get_experiment_model(model_fn, experiment_path, params_grid, loss_fn_fn, dat
             train_loader, val_loader = dataset_fn(params)
 
             for epoch in pbar:
+
                 start_time = time.time()
                 train_loss  = train_step(model, device, train_loader, optimizer, loss_fn, epoch, params,"train")
                 train_time += time.time() - start_time
@@ -189,6 +225,8 @@ def get_experiment_model(model_fn, experiment_path, params_grid, loss_fn_fn, dat
 
                 pbar.set_postfix(train_loss=f"{train_loss:.5f}",val_loss=f"{val_loss:.10f}")
 
+                
+
                 if epoch % checkpoint_freq == 0 or epoch == epochs:
                     checkpoint_params = params | {"checkpoint": epoch}
                     name = model_file_name(checkpoint_params)
@@ -196,7 +234,7 @@ def get_experiment_model(model_fn, experiment_path, params_grid, loss_fn_fn, dat
                     model_path = os.path.join(experiment_path, name)
                     print("Saving", name)
                     train_results[model_path] = {"train_time": train_time, "train_losses": train_losses.copy(), "val_losses": val_losses.copy()}
-                    torch.save(model.state_dict(), model_path)
+                    torch.save(unbounded_model.state_dict(), model_path)
 
                     checkpoint_model = model_fn(params)
                     checkpoint_model.load_state_dict(torch.load(model_path, map_location=device))

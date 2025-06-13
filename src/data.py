@@ -47,6 +47,8 @@ class Jitter:
         self.sigma = sigma#sigma.view(1, -1)  # shape (1, num_assets), for broadcasting
 
     def __call__(self, x):
+
+        # This needs fixing hahaha
         noise = torch.randn_like(x) * self.sigma  # apply per-asset noise
         return x + noise
     
