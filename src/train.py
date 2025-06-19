@@ -150,8 +150,7 @@ def get_bounded_model2(model):
 
 def name_experiments(experiments):
     return {label_from_params(v["params"], experiments): v for k, v in experiments.items()}
-
-def get_experiment_model(model_fn, experiment_path, params_grid, loss_fn_fn, dataset_fn, device="cuda"):
+def get_experiment_model(model_fn, experiment_path, params_grid, loss_fn_fn, dataset_fn, device="cuda", train_robust=True):
     experiments = {}
 
     train_result_path = os.path.join(experiment_path, "train_results.csv")
@@ -177,14 +176,10 @@ def get_experiment_model(model_fn, experiment_path, params_grid, loss_fn_fn, dat
                 paths[epoch] = model_path
 
         load_checkpoint = params.get("checkpoint", None)
-        print(load_checkpoint)
         if load_checkpoint is not None:
             paths = {load_checkpoint: paths[load_checkpoint]}
             del params["checkpoint"]
-            print(paths)
-        print([os.path.exists(p) for p in paths.values()])
-            
-      
+        
        
         if all([os.path.exists(p) for p in paths.values()]):
             for checkpoint, path in paths.items():
@@ -199,8 +194,13 @@ def get_experiment_model(model_fn, experiment_path, params_grid, loss_fn_fn, dat
             print("Training", model_file_name(params))
             if "seed" in params:
                 set_seed(params["seed"])
-            unbounded_model = model_fn(params)
-            model = get_bounded_model2(unbounded_model)
+            model = model_fn(params)
+            if train_robust:
+                bounded_model = get_bounded_model2(model)
+            else:
+                bounded_model = model
+
+            # model = unbounded_model
             loss_fn = loss_fn_fn(params)
             train_losses = []
             val_losses = []
@@ -213,33 +213,37 @@ def get_experiment_model(model_fn, experiment_path, params_grid, loss_fn_fn, dat
 
             train_loader, val_loader = dataset_fn(params)
 
+            best_val_loss = np.inf
+            patience_count = 0
+
             for epoch in pbar:
 
                 start_time = time.time()
-                train_loss  = train_step(model, device, train_loader, optimizer, loss_fn, epoch, params,"train")
+                train_loss  = train_step(model, device, train_loader, optimizer, loss_fn, epoch, params,"train", bounded_model=bounded_model)
                 train_time += time.time() - start_time
 
-                val_loss = train_step(model, device, val_loader, optimizer, loss_fn, epoch, params, "eval")
+                val_loss = train_step(model, device, val_loader, optimizer, loss_fn, epoch, params, "eval", bounded_model=bounded_model)
                 train_losses.append(train_loss)
                 val_losses.append(val_loss)
 
                 pbar.set_postfix(train_loss=f"{train_loss:.5f}",val_loss=f"{val_loss:.10f}")
 
-                
-
                 if epoch % checkpoint_freq == 0 or epoch == epochs:
-                    checkpoint_params = params | {"checkpoint": epoch}
+                    checkpoint_params = params | {"checkpoint": epoch} #{"checkpoint": epoch}
                     name = model_file_name(checkpoint_params)
                    
                     model_path = os.path.join(experiment_path, name)
                     print("Saving", name)
                     train_results[model_path] = {"train_time": train_time, "train_losses": train_losses.copy(), "val_losses": val_losses.copy()}
-                    torch.save(unbounded_model.state_dict(), model_path)
+                    torch.save(model.state_dict(), model_path)
 
                     checkpoint_model = model_fn(params)
                     checkpoint_model.load_state_dict(torch.load(model_path, map_location=device))
                     experiments[name] = {"model": checkpoint_model, "params": checkpoint_params, "results": {}, "train_results": train_results[model_path]}
                     with open(train_result_path, 'w') as file: 
                         json.dump(train_results, file, indent=4)
+
+                if epoch == epochs:
+                    break
     experiments = name_experiments(experiments)
     return experiments

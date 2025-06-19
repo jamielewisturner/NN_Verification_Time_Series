@@ -1,6 +1,8 @@
 import torch.nn as nn
 import torch
 from torch.nn import functional as F
+import numpy as np
+from sklearn.covariance import LedoitWolf
 
 class CustomSoftmax(nn.Module):
     def __init__(self, dim: int = -1, eps: float = 1e-5):
@@ -126,6 +128,67 @@ class FixedWeightModel(nn.Module):
     def forward(self, x):
         b = x.shape[0]
         return self.weights.to(x.device, dtype=x.dtype).expand(b, -1)
+    
+
+
+class MinVarianceModel(nn.Module):
+    def __init__(self, saved_mean, saved_std):
+        super(MinVarianceModel, self).__init__()
+        self.shrink = LedoitWolf()
+        self.eps = 1e-6
+        self.saved_mean = saved_mean
+        self.saved_std = saved_std
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        device = x.device
+        m = self.saved_mean.view(1, 1, -1).to(device)
+        s = self.saved_std.view(1, 1, -1).to(device)
+        x_raw = x * s + m
+        windows = x_raw.detach().cpu().numpy()
+        batch, _, n_assets = windows.shape
+        mv_list = []
+        for i in range(batch):
+            data = windows[i]
+            Sigma_shrunk = self.shrink.fit(data).covariance_
+            inv_S = np.linalg.pinv(Sigma_shrunk)
+            ones = np.ones(n_assets)
+            w_raw = inv_S.dot(ones)
+            w_clipped = np.maximum(w_raw, self.eps)
+            w = w_clipped / w_clipped.sum()
+            mv_list.append(w)
+        mv_arr = np.stack(mv_list, axis=0)
+        return torch.tensor(mv_arr, device=x.device, dtype=x.dtype)
+
+class UniformModel(nn.Module):
+    def __init__(self, n_assets: int = 4):
+        super(UniformModel, self).__init__()
+        self.n_assets = n_assets
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b = x.shape[0]
+        return torch.full((b, self.n_assets), 1/self.n_assets,
+                          device=x.device, dtype=x.dtype)
+
+class InverseVolModel(nn.Module):
+    def __init__(self, saved_mean, saved_std):
+        super(InverseVolModel, self).__init__()
+        self.saved_mean = saved_mean
+        self.saved_std = saved_std
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (batch, window, n_assets) standardized returns
+        """
+
+        m = self.saved_mean.view(1, 1, -1).to(x.device)
+        s = self.saved_std.view(1, 1, -1).to(x.device)
+        x_raw = x * s + m
+
+        # compute sample vol per asset
+        vol = x_raw.std(dim=1, unbiased=True)         # (batch, n_assets)
+        inv_vol = 1.0 / vol
+        weights = inv_vol / inv_vol.sum(dim=1, keepdim=True)
+        return weights
+
 
 class MLP(nn.Module):
     def __init__(self, input_size, output_size=1):

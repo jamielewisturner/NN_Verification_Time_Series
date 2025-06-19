@@ -3,6 +3,39 @@ from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
 import numpy as np
 import torch
 
+
+import pickle
+from IPython import get_ipython
+import os 
+import json
+
+
+def run_abcrown_from_dict_ipython(args_dict, debug_file):
+    cmd = "python alpha-beta-CROWN/complete_verifier/abcrown.py"
+
+    output_path = args_dict["output_file"]
+    results_path = args_dict["results_file"]
+    cex_path = args_dict["cex_path"]
+
+
+    if os.path.isfile(output_path):
+        os.remove(output_path)
+    if os.path.isfile(results_path):
+        os.remove(results_path)
+
+    with open(cex_path, "w") as f:
+        json.dump( {"x": [], "adv_output": []}, f, indent=2)
+
+    for key, value in args_dict.items():
+        cmd += f" --{key} {value}"
+
+    cmd = f"{cmd} > {debug_file}"
+
+
+
+    get_ipython().system(cmd)
+
+
 def pgd_attack(model, x_init, y, eps, loss_fn, n_steps=20, step_size=0.1, device='cuda:0'):
     # 0/0
     model.eval()
