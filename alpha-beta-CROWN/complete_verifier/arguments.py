@@ -236,7 +236,7 @@ class ConfigHandler:
                           help='Type of verification specification. "lp" = L_p norm, "box" = element-wise lower and upper bound provided by dataloader.',
                           hierarchy=h + ["type"])
         self.add_argument("--robustness_type", type=str, default="verified-acc",
-                          choices=["verified-acc", "runnerup", "clean-acc", "specify-target", "all-positive"],
+                          choices=["verified-acc", "runnerup", "clean-acc", "specify-target", "all-positive", "MR"],
                           help='For robustness verification: verify against all labels ("verified-acc" mode), or just the runnerup labels ("runnerup" mode), '
                                'or using a specified label in dataset ("specify-target" mode, only used for oval20). Not used when a VNNLIB spec is used.',
                           hierarchy=h + ["robustness_type"])
@@ -246,6 +246,9 @@ class ConfigHandler:
         self.add_argument("--epsilon", type=float, default=None,
                           help='Set perturbation size (Lp norm). If not set, a default value may be used based on dataset loader.',
                           hierarchy=h + ["epsilon"])
+        self.add_argument("--delta", type=float, default=None,
+                          help='Set perturbation size (Lp norm). If not set, a default value may be used based on dataset loader.',
+                          hierarchy=h + ["delta"])
         self.add_argument("--epsilon_min", type=float, default=0.,
                           help='Set an optional minimum perturbation size (Lp norm).',
                           hierarchy=h + ["epsilon_min"])

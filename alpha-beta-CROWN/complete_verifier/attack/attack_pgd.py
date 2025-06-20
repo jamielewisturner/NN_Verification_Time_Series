@@ -20,6 +20,7 @@ import torch.nn as nn
 from torch.optim import Optimizer
 import numpy as np
 from tqdm import tqdm
+import json
 import arguments
 import os
 import subprocess
@@ -105,34 +106,23 @@ def check_and_save_cex(adv_example, adv_output, vnnlib, res_path, expected_verif
 
 
 def default_adv_saver(adv_example, adv_output, res_path):
-    x = adv_example.view(-1).detach().cpu()
-    adv_output = adv_output.detach().cpu().numpy()
-    with open(res_path, 'w+') as f:
-        # f.write("; Counterexample with prediction: {}\n".format(attack_label))
-        # f.write("\n")
+    x = adv_example.view(-1).detach().cpu().numpy().tolist()
+    adv_output = adv_output.detach().cpu().numpy().tolist()
 
-        # for some cases the onnx input shape has no batch dim. (cctsdb_yolo)
-        input_dim = len(adv_example) if adv_example.ndim == 1 else np.prod(adv_example[0].shape)
-        # for i in range(input_dim):
-        #     f.write("(declare-const X_{} Real)\n".format(i))
-        #
-        # for i in range(adv_output.shape[1]):
-        #     f.write("declare-const Y_{} Real)\n".format(i))
+    data = {"x": [], "adv_output": []}
+    if os.path.exists(res_path):
+        with open(res_path, 'r') as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                pass
 
-        # f.write("; Input assignment:\n")
-        f.write("(")
-        for i in range(input_dim):
-            f.write("(X_{}  {})\n".format(i, x[i].item()))
+    data["x"].append(x)
+    data["adv_output"].append(adv_output)
 
-        # f.write("\n")
-        # f.write("; Output obtained:\n")
-        for i in range(adv_output.shape[1]):
-            if i == 0:
-                f.write("(Y_{} {})".format(i, adv_output[0,i]))
-            else:
-                f.write("\n(Y_{} {})".format(i, adv_output[0,i]))
-        f.write(")")
-        f.flush()
+    with open(res_path, 'w') as f:
+        json.dump(data, f)
+
 
     if arguments.Config["general"]["eval_adv_example"]:
         onnx_path = arguments.Config["model"]["onnx_path"]
